@@ -4,7 +4,7 @@ organization := "com.wordnik.swagger"
 
 scalaVersion := "2.11.6"
 
-//crossScalaVersions := Seq("2.9.3", "2.10.5")
+crossScalaVersions := Seq("2.9.3", "2.10.5")
 
 scalacOptions ++= Seq(
     	"-unchecked", 
@@ -16,10 +16,10 @@ scalacOptions ++= Seq(
     	"-language:implicitConversions", 
     	"-language:reflectiveCalls")
     	
-//javacOptions in compile ++= Seq(
-//		"-target","1.6", 
-//		"-source", "1.6", 
-//		"-Xlint:deprecation")
+javacOptions in compile ++= Seq(
+		"-target","1.6", 
+		"-source", "1.6", 
+		"-Xlint:deprecation")
 		
 		
 //"ch.qos.logback" % "logback-classic" % "1.0.13" % "provided",		
