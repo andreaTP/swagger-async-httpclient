@@ -1,29 +1,29 @@
 package com.wordnik.swagger.client
 
-import com.ning.http._
-import client._
-import client.{ Cookie => AhcCookie }
-import collection.JavaConverters._
-import java.util.{concurrent, TimeZone, Date, Locale}
-import java.util.concurrent.ConcurrentHashMap
-import io.Codec
-import java.nio.charset.Charset
 import java.io.File
 import java.net.URI
-import rl.{UrlCodingUtils, MapQueryString}
-import scala.concurrent.{Promise, ExecutionContext, Future}
-import scala.concurrent.duration._
-import org.json4s.JsonAST.JValue
-import org.json4s.jackson.JsonMethods
+import java.nio.charset.Charset
 import java.text.SimpleDateFormat
-import scala.util.{Failure, Success}
-import com.wordnik.swagger.client.async.BuildInfo
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
-import java.util.{ concurrent => juc }
-import org.jboss.netty.util.{HashedWheelTimer, Timer}
-import org.jboss.netty.channel.socket.nio.{NioWorkerPool, NioClientSocketChannelFactory}
+import java.util.{Date, Locale, TimeZone, concurrent => juc}
+
+import com.ning.http.client._
+import com.ning.http.client.multipart.{StringPart, FilePart}
+import com.ning.http.client.cookie.{Cookie => AhcCookie}
 import com.ning.http.client.providers.netty.NettyAsyncHttpProviderConfig
+import org.jboss.netty.channel.socket.nio.{NioClientSocketChannelFactory, NioWorkerPool}
+import org.jboss.netty.util.{HashedWheelTimer, Timer}
 import rl.Imports._
+import rl.{MapQueryString, UrlCodingUtils}
+
+import scala.collection.JavaConverters._
+import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.io.Codec
+import scala.util.Failure
+
+//import com.typesafe.scalalogging._
 
 object RestClient {
 
@@ -38,7 +38,7 @@ object RestClient {
     }
   }
 
-  val DefaultUserAgent = s"Reverb SwaggerClient / ${BuildInfo.version}"
+  val DefaultUserAgent = s"Reverb SwaggerClient"
 
   private implicit def stringWithExt(s: String) = new {
     def isBlank = s == null || s.trim.isEmpty
@@ -53,7 +53,8 @@ object RestClient {
                             comment : String  = "",
                             httpOnly: Boolean = false,
                             version : Int = 0,
-                            encoding: String  = "UTF-8")
+                            encoding: String  = "UTF-8",
+                            wrap: Boolean = false)
 
   trait HttpCookie {
     implicit def cookieOptions: CookieOptions
@@ -178,7 +179,7 @@ object RestClient {
 
     val inputStream = response.getResponseBodyAsStream
 
-    val uri = response.getUri
+    val uri = response.getUri.toJavaNetURI
 
     def body = response.getResponseBody(charset getOrElse "UTF-8")
 
@@ -206,13 +207,14 @@ object RestClient {
     object BasicDefaults extends Defaults {
       lazy val timer = new HashedWheelTimer()
       def builder = (new AsyncHttpClientConfig.Builder()
-        setAllowPoolingConnection true
-        setRequestTimeoutInMs 45000
-        setCompressionEnabled true
-        setFollowRedirects false
-        setMaximumConnectionsPerHost 200
+        setAllowPoolingConnections true
+        setRequestTimeout 45000
+        setCompressionEnforced true
+        setFollowRedirect false
+        setMaxConnectionsPerHost 200
         setUserAgent DefaultUserAgent
-        setMaxRequestRetry 0)
+        setMaxRequestRetry 0
+      )
     }
 
     /** Uses daemon threads and tries to exit cleanly when running in sbt  */
@@ -249,10 +251,11 @@ object RestClient {
           }
         }
 
-        BasicDefaults.builder.setAsyncHttpClientProviderConfig(
-          new NettyAsyncHttpProviderConfig().addProperty(
-            NettyAsyncHttpProviderConfig.SOCKET_CHANNEL_FACTORY,
-            nioClientSocketChannelFactory))
+        BasicDefaults.builder.setAsyncHttpClientProviderConfig({
+            val config = new NettyAsyncHttpProviderConfig()
+            config.setSocketChannelFactory(nioClientSocketChannelFactory)
+            config
+        })
       }
       lazy val timer = new HashedWheelTimer(factory)
     }
@@ -261,24 +264,25 @@ object RestClient {
 
 class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
 
-  import RestClient._
+  import com.wordnik.swagger.client.RestClient._
   protected def underlying: Defaults = {
     if (InternalDefaults.inTrapExit) InternalDefaults.SbtProcessDefaults
     else InternalDefaults.BasicDefaults
   }
   protected val locator: ServiceLocator = config.locator
+  
   protected val clientConfig: AsyncHttpClientConfig = (underlying.builder
     setUserAgent config.userAgent
-    setRequestTimeoutInMs config.idleTimeout.toMillis.toInt
-    setConnectionTimeoutInMs config.connectTimeout.toMillis.toInt
-    setCompressionEnabled config.enableCompression               // enable content-compression
-    setAllowPoolingConnection true                               // enable http keep-alive
-    setFollowRedirects config.followRedirects).build()
+    setRequestTimeout config.idleTimeout.toMillis.toInt
+    setConnectTimeout config.connectTimeout.toMillis.toInt
+    setCompressionEnforced config.enableCompression               // enable content-compression
+    setAllowPoolingConnections true                               // enable http keep-alive
+    setFollowRedirect config.followRedirects).build()
 
-  import StringHttpMethod._
+  import com.wordnik.swagger.client.StringHttpMethod._
   implicit val execContext = ExecutionContext.fromExecutorService(clientConfig.executorService())
 
-  private[this] val mimes = new Mimes with Logging {
+  private[this] val mimes = new Mimes {
     protected def warn(message: String) = logger.warn(message)
   }
 
@@ -302,22 +306,22 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
 
   private[this] def addTimeout(timeout: Duration)(req: AsyncHttpClient#BoundRequestBuilder) = {
     if (timeout.isFinite()) {
-      val prc = new PerRequestConfig()
-      prc.setRequestTimeoutInMs(timeout.toMillis.toInt)
-      req.setPerRequestConfig(prc)
+      req.setRequestTimeout(timeout.toMillis.toInt)
+    } else {
+      req
     }
-    req
   }
 
   private[this] def addParameters(method: String, params: Iterable[(String, String)], isMultipart: Boolean = false, charset: Charset = Codec.UTF8.charSet)(req: AsyncHttpClient#BoundRequestBuilder) = {
+    val sparams = params.toList.map(p => new Param(p._1,p._2)).asJava
     method.toUpperCase(Locale.ENGLISH) match {
-      case `GET` | `DELETE` | `HEAD` | `OPTIONS` ⇒ params foreach { case (k, v) ⇒ req addQueryParameter (k, v) }
+      case `GET` | `DELETE` | `HEAD` | `OPTIONS` ⇒ req addQueryParams sparams
       case `PUT` | `POST`   | `PATCH`            ⇒ {
         if (!isMultipart)
           if (req.build().getHeaders.getFirstValue("Content-Type").startsWith("application/x-www-form-urlencoded"))
-            params foreach { case (k, v) ⇒ req addParameter (k, v) }
+            req setFormParams sparams
           else
-            params foreach { case (k, v) => req addQueryParameter(k, v) }
+            req addQueryParams sparams
         else {
           params foreach { case (k, v) => req addBodyPart new StringPart(k, v, charset.name)}
         }
@@ -337,7 +341,7 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
   private[this] def addFiles(files: Iterable[(String, File)], isMultipart: Boolean)(req: AsyncHttpClient#BoundRequestBuilder) = {
     if (isMultipart) {
       files foreach { case (nm, file) =>
-        req.addBodyPart(new FilePart(nm, file, mimes(file), FileCharset(file).name))
+        req.addBodyPart(new FilePart(nm, file, mimes(file), FileCharset(file)))
       }
     }
     req
@@ -345,14 +349,16 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
 
   private[this] def addCookies(req: AsyncHttpClient#BoundRequestBuilder) = {
     cookies foreach { cookie =>
-      val ahcCookie = new AhcCookie(
-        cookie.cookieOptions.domain,
+      val ahcCookie = AhcCookie.newValidCookie(
         cookie.name,
         cookie.value,
+        cookie.cookieOptions.wrap,
+        cookie.cookieOptions.domain,
         cookie.cookieOptions.path,
+        -1,
         cookie.cookieOptions.maxAge,
         cookie.cookieOptions.secure,
-        cookie.cookieOptions.version)
+        cookie.cookieOptions.httpOnly)
       req.addCookie(ahcCookie)
     }
     req
@@ -361,7 +367,8 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
   private[this] def addQuery(u: URI)(req: AsyncHttpClient#BoundRequestBuilder) = {
     u.getQuery.blankOption foreach { uu =>
       rl.QueryString(uu) match {
-        case m: MapQueryString => m.value foreach { case (k, v) => v foreach { req.addQueryParameter(k, _) } }
+        case m: MapQueryString => 
+          req addQueryParams m.value.map{case (k,v) => v.map(new Param(k,_))}.flatten.toList.asJava
         case _ =>
       }
     }
@@ -403,7 +410,13 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
     URI.create(b+p+q+f)
   }
 
-  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String = "", timeout: Duration = 90.seconds): Future[RestClientResponse] = {
+  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)]): Future[ClientResponse] =
+    submit(method, uri, params, headers, "", 90.seconds)
+  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String): Future[ClientResponse] =
+    submit(method, uri, params, headers, body, 90.seconds)
+  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], timeout: Duration): Future[ClientResponse] =
+    submit(method, uri, params, headers, "", timeout)
+  def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String, timeout: Duration): Future[ClientResponse] = {
     val u = URI.create(if (UrlCodingUtils.needsUrlEncoding(uri)) uri.urlEncode else uri).normalize()
     val files = requestFiles(params)
     val isMultipart = isMultipartRequest(method, headers, files)
@@ -442,5 +455,5 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
     Map("Content-Type" -> value)
   }
 
-  def close() = Future { client.close() }
+  def close() = client.closeAsynchronously()
 }
