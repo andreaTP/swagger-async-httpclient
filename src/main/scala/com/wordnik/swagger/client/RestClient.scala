@@ -1,7 +1,7 @@
 package com.wordnik.swagger.client
 
 import java.io.File
-import java.net.URI
+import java.net.{URI, URLEncoder}
 import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.concurrent.ConcurrentHashMap
@@ -15,8 +15,6 @@ import com.ning.http.client.cookie.{Cookie => AhcCookie}
 import com.ning.http.client.providers.netty.NettyAsyncHttpProviderConfig
 import org.jboss.netty.channel.socket.nio.{NioClientSocketChannelFactory, NioWorkerPool}
 import org.jboss.netty.util.{HashedWheelTimer, Timer}
-//import rl.Imports._
-//import rl.{MapQueryString, UrlCodingUtils}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -368,7 +366,18 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
     if (allowsBody.contains(method.toUpperCase(Locale.ENGLISH)) && body.nonBlank) req.setBody(body)
     req
   }
-
+  
+  /*
+  private[this] def addQuery(u: URI)(req: AsyncHttpClient#BoundRequestBuilder) = {
+    u.getQuery.blankOption foreach { uu =>
+      rl.QueryString(uu) match {
+        case m: MapQueryString => m.value foreach { case (k, v) => v foreach { req.addQueryParameter(k, _) } }
+        case _ =>
+      }
+    }
+    req
+  }
+  */
 
   private[this] def requestFiles(params: Iterable[(String, Any)]) = params collect { case (k, v: File) => k -> v }
   private[this] def paramsFrom(params: Iterable[(String, Any)]) = params collect {
@@ -403,10 +412,11 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
   def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], timeout: Duration): Future[ClientResponse] =
     submit(method, uri, params, headers, "", timeout)
   def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String, timeout: Duration): Future[ClientResponse] = {
-    val uriStr = java.net.URLEncoder.encode(uri, "UTF-8") 
+    val uriStr = uri.trim()
     val u = URI.create(uriStr).normalize()
     val files = requestFiles(params)
     val isMultipart = isMultipartRequest(method, headers, files)
+    
     locator.pickOneAsUri(config.name, "") flatMap { opt =>
       if (opt.isEmpty) sys.error("No host could be found for %s".format(config.name))
       else {
@@ -416,16 +426,17 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
               andThen addHeaders(headers, files)
               andThen addCookies
               andThen addParameters(method, paramsFrom(params), isMultipart)
+              //andThen addQuery(u) ... check what happens
               andThen addBody(method, body)
               andThen addFiles(files, isMultipart)
-              andThen executeRequest
-        )(requestUri(Uri.create(baseUrl).withNewQuery(u.getQuery).toJavaNetURI().normalize(), u).toASCIIString)
+              andThen executeRequest)(requestUri(URI.create(baseUrl).normalize(), u).toASCIIString)
       }
     }
   }
 
   private[this] def executeRequest(req: AsyncHttpClient#BoundRequestBuilder): Future[RestClientResponse] = {
-    logger.debug("Requesting:\n" + req.build())
+    println("Request is: --> "+req.build())
+    //logger.debug("Requesting:\n" + req.build())
     val promise = Promise[RestClientResponse]()
     req.execute(new AsyncCompletionHandler[Promise[RestClientResponse]] {
       override def onThrowable(t: Throwable) = promise.complete(Failure(t))
