@@ -9,21 +9,20 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.{Date, Locale, TimeZone, concurrent => juc}
 
 import com.ning.http.client._
+import com.ning.http.client.uri.Uri
 import com.ning.http.client.multipart.{StringPart, FilePart}
 import com.ning.http.client.cookie.{Cookie => AhcCookie}
 import com.ning.http.client.providers.netty.NettyAsyncHttpProviderConfig
 import org.jboss.netty.channel.socket.nio.{NioClientSocketChannelFactory, NioWorkerPool}
 import org.jboss.netty.util.{HashedWheelTimer, Timer}
-import rl.Imports._
-import rl.{MapQueryString, UrlCodingUtils}
+//import rl.Imports._
+//import rl.{MapQueryString, UrlCodingUtils}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.io.Codec
 import scala.util.Failure
-
-//import com.typesafe.scalalogging._
 
 object RestClient {
 
@@ -54,7 +53,7 @@ object RestClient {
                             httpOnly: Boolean = false,
                             version : Int = 0,
                             encoding: String  = "UTF-8",
-                            wrap: Boolean = false)
+                            rawValue: String = "")
 
   trait HttpCookie {
     implicit def cookieOptions: CookieOptions
@@ -282,10 +281,6 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
   import com.wordnik.swagger.client.StringHttpMethod._
   implicit val execContext = ExecutionContext.fromExecutorService(clientConfig.executorService())
 
-  private[this] val mimes = new Mimes {
-    protected def warn(message: String) = logger.warn(message)
-  }
-
   private[this] val cookies = new CookieJar(Map.empty)
 
   protected def createClient() = new AsyncHttpClient(clientConfig)
@@ -338,10 +333,12 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
     req
   }
 
+  final val UTF_8 = java.nio.charset.Charset.forName("UTF-8")
+  
   private[this] def addFiles(files: Iterable[(String, File)], isMultipart: Boolean)(req: AsyncHttpClient#BoundRequestBuilder) = {
     if (isMultipart) {
       files foreach { case (nm, file) =>
-        req.addBodyPart(new FilePart(nm, file, mimes(file), FileCharset(file)))
+        req.addBodyPart(new FilePart(nm, file, "application/json", UTF_8))
       }
     }
     req
@@ -352,8 +349,8 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
       val ahcCookie = AhcCookie.newValidCookie(
         cookie.name,
         cookie.value,
-        cookie.cookieOptions.wrap,
         cookie.cookieOptions.domain,
+        cookie.cookieOptions.rawValue,
         cookie.cookieOptions.path,
         -1,
         cookie.cookieOptions.maxAge,
@@ -363,18 +360,7 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
     }
     req
   }
-
-  private[this] def addQuery(u: URI)(req: AsyncHttpClient#BoundRequestBuilder) = {
-    u.getQuery.blankOption foreach { uu =>
-      rl.QueryString(uu) match {
-        case m: MapQueryString => 
-          req addQueryParams m.value.map{case (k,v) => v.map(new Param(k,_))}.flatten.toList.asJava
-        case _ =>
-      }
-    }
-    req
-  }
-
+  
   private[this] val allowsBody = Vector(PUT, POST, PATCH)
 
 
@@ -417,7 +403,8 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
   def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], timeout: Duration): Future[ClientResponse] =
     submit(method, uri, params, headers, "", timeout)
   def submit(method: String, uri: String, params: Iterable[(String, Any)], headers: Iterable[(String, String)], body: String, timeout: Duration): Future[ClientResponse] = {
-    val u = URI.create(if (UrlCodingUtils.needsUrlEncoding(uri)) uri.urlEncode else uri).normalize()
+    val uriStr = java.net.URLEncoder.encode(uri, "UTF-8") 
+    val u = URI.create(uriStr).normalize()
     val files = requestFiles(params)
     val isMultipart = isMultipartRequest(method, headers, files)
     locator.pickOneAsUri(config.name, "") flatMap { opt =>
@@ -429,10 +416,10 @@ class RestClient(config: SwaggerConfig) extends TransportClient with Logging {
               andThen addHeaders(headers, files)
               andThen addCookies
               andThen addParameters(method, paramsFrom(params), isMultipart)
-              andThen addQuery(u)
               andThen addBody(method, body)
               andThen addFiles(files, isMultipart)
-              andThen executeRequest)(requestUri(URI.create(baseUrl).normalize(), u).toASCIIString)
+              andThen executeRequest
+        )(requestUri(Uri.create(baseUrl).withNewQuery(u.getQuery).toJavaNetURI().normalize(), u).toASCIIString)
       }
     }
   }
